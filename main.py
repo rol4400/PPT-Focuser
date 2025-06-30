@@ -1,7 +1,9 @@
 import sys
+import os
 import time
 import ctypes
 import threading
+import subprocess
 from io import BytesIO
 import win32gui
 import win32con
@@ -972,8 +974,76 @@ class TrayApp(QApplication):
         self.quit()
 
 
+def check_for_updates():
+    """Check for updates from GitHub repository"""
+    try:
+        # Get the current directory (where main.py is located)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        print("Checking for updates from GitHub repository...")
+        update_found = False
+        update_message = ""
+        
+        # Check if it's a git repository
+        git_dir = os.path.join(script_dir, ".git")
+        if not os.path.exists(git_dir):
+            print("Not a git repository. Cloning from GitHub...")
+            # Clone the repository if it doesn't exist
+            subprocess.run(
+                ["git", "clone", "https://github.com/rol4400/PPT-Focuser.git", "."],
+                cwd=script_dir,
+                check=True
+            )
+            update_found = True
+            update_message = "Repository cloned successfully."
+        else:
+            # Pull updates if it is a git repository
+            result = subprocess.run(
+                ["git", "pull", "https://github.com/rol4400/PPT-Focuser.git"],
+                cwd=script_dir,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            
+            if "Already up to date" in result.stdout:
+                print("Application is up to date.")
+            else:
+                print(f"Updates pulled from GitHub: {result.stdout.strip()}")
+                print("Restart might be required for changes to take effect.")
+                update_found = True
+                update_message = f"Updates installed: {result.stdout.strip()}"
+        
+        return update_found, update_message
+    except Exception as e:
+        print(f"Error checking for updates: {e}")
+        return False, str(e)
+
+
 def main():
+    # Start the application first to access Qt functionality
     app = TrayApp(sys.argv)
+    
+    # Check for updates after application is initialized
+    def delayed_update_check():
+        # Wait a short moment to ensure tray icon is ready
+        time.sleep(1)
+        update_found, update_message = check_for_updates()
+        
+        # Show notification if update was found
+        if update_found and hasattr(app, 'tray'):
+            app.tray.showMessage(
+                "PPT Redirector Updated",
+                update_message + "\nSome changes may require a restart.",
+                app.style().standardIcon(app.style().SP_DialogInformationIcon),
+                5000  # Show for 5 seconds
+            )
+    
+    # Run the update check in a separate thread to avoid blocking the UI
+    update_thread = threading.Thread(target=delayed_update_check, daemon=True)
+    update_thread.start()
+    
+    # Start the application event loop
     sys.exit(app.exec_())
 
 
