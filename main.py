@@ -1016,19 +1016,20 @@ class TrayApp(QApplication):
             else:
                 # Add to startup by creating a shortcut
                 try:
-                    # First ensure the batch file exists
-                    if not os.path.exists(batch_file_path):
-                        with open(batch_file_path, 'w') as f:
-                            f.write('@echo off\ncd /d "%~dp0"\npythonw main.py')
+                    # First ensure the batch file exists with updated content
+                    with open(batch_file_path, 'w') as f:
+                        f.write('@echo off\ncd /d "%~dp0"\nstart /b "" pythonw main.py\nexit')
                     
-                    # Create the shortcut using PowerShell
+                    # Create the shortcut using PowerShell - direct link to pythonw for completely hidden execution
+                    main_script_path = os.path.join(script_dir, "main.py")
                     powershell_cmd = f'''
                     $WScriptShell = New-Object -ComObject WScript.Shell
                     $Shortcut = $WScriptShell.CreateShortcut('{shortcut_path}')
-                    $Shortcut.TargetPath = '{batch_file_path}'
+                    $Shortcut.TargetPath = 'pythonw.exe'
+                    $Shortcut.Arguments = '"{main_script_path}"'
                     $Shortcut.Description = 'Start PPT Redirector'
                     $Shortcut.WorkingDirectory = '{script_dir}'
-                    $Shortcut.WindowStyle = 7
+                    $Shortcut.WindowStyle = 0
                     $Shortcut.Save()
                     '''
                     
