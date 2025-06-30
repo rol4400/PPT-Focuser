@@ -362,26 +362,39 @@ def send_key_to_window(hwnd, vk):
 def key_listener():
     global stop_flag, target_hwnd, target_title
     key_pressed = {key: False for key in VK_KEYS.keys()}
+    key_last_press_time = {key: 0 for key in VK_KEYS.keys()}
+    debounce_time = 0.3  # Debounce time in seconds (adjust as needed)
     failed_attempts = 0
     max_failed_attempts = 5
     
     while not stop_flag:
         if target_hwnd and win32gui.IsWindow(target_hwnd):
+            current_time = time.time()
+            
             for key, vk in VK_KEYS.items():
                 is_pressed = keyboard.is_pressed(key)
                 
-                # Only send key if it's newly pressed (not held down)
+                # Only send key if it's newly pressed (not held down) and debounce time has passed
                 if is_pressed and not key_pressed[key]:
-                    print(f"Sending {key} to {target_title}")
-                    success = send_key_to_window(target_hwnd, vk)
+                    time_since_last_press = current_time - key_last_press_time[key]
                     
-                    if success:
-                        failed_attempts = 0  # Reset counter on success
+                    # Check if enough time has passed since the last key press (debouncing)
+                    if time_since_last_press > debounce_time:
+                        print(f"Sending {key} to {target_title} (time since last: {time_since_last_press:.2f}s)")
+                        success = send_key_to_window(target_hwnd, vk)
+                        
+                        # Update last press time
+                        key_last_press_time[key] = current_time
+                        
+                        if success:
+                            failed_attempts = 0  # Reset counter on success
+                        else:
+                            failed_attempts += 1
+                            if failed_attempts >= max_failed_attempts:
+                                print(f"Warning: Failed to send keys {failed_attempts} times. Target window may not be responding.")
+                                failed_attempts = 0  # Reset to avoid spam
                     else:
-                        failed_attempts += 1
-                        if failed_attempts >= max_failed_attempts:
-                            print(f"Warning: Failed to send keys {failed_attempts} times. Target window may not be responding.")
-                            failed_attempts = 0  # Reset to avoid spam
+                        print(f"Ignoring {key} press - too soon after last press ({time_since_last_press:.2f}s < {debounce_time}s)")
                     
                     key_pressed[key] = True
                 elif not is_pressed:
