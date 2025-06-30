@@ -1,0 +1,4 @@
+PyQt5>=5.15.0
+pywin32>=301
+keyboard>=0.13.5
+Pillow>=8.0.0
