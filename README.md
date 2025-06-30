@@ -24,14 +24,27 @@ A Windows application that redirects arrow keys and page up/down keys to a selec
    ```
    python main.py
    ```
+   Or use the provided batch file:
+   ```
+   start_ppt_redirector.bat
+   ```
 
 2. The application will start in the system tray (look for the icon in the bottom-right corner)
 
-3. Right-click the tray icon and select "Select Window" to choose your target window
+3. Click or right-click the tray icon and select "Select Window" to choose your target window
 
 4. Browse through the list of windows (with thumbnails) and select the one you want to control
 
 5. Click "Set as Target" to confirm your selection
+
+## Setting Up Automatic Startup
+
+To make PPT Redirector start automatically when your computer boots:
+
+1. Right-click on `add_to_startup.ps1` and select "Run with PowerShell"
+2. Confirm any security prompts if they appear
+
+See `STARTUP_INSTRUCTIONS.md` for detailed instructions and manual alternatives.
 
 6. Now when you press Left/Right arrow keys or Page Up/Down, they will be sent to your target window instead of the currently focused window
 

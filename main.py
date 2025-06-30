@@ -9,6 +9,7 @@ import win32gui
 import win32con
 import win32process
 import keyboard
+import winreg
 
 # Try to import optional dependencies for thumbnails
 try:
@@ -884,6 +885,20 @@ class WindowSelector(QWidget):
         else:
             QMessageBox.warning(self, "No Selection", "Please select a window first.")
 
+def is_windows_dark_mode():
+    """Check if Windows is in dark mode"""
+    try:
+        # Open the key where Windows stores its theme settings
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                           r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        
+        # Value 0 means dark mode, 1 means light mode
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return value == 0
+    except Exception as e:
+        print(f"Error checking dark mode: {e}")
+        return False
+
 
 class TrayApp(QApplication):
     def __init__(self, sys_argv):
@@ -894,7 +909,12 @@ class TrayApp(QApplication):
 
         # Set up system tray
         try:
-            icon = QIcon("pen.png")
+            if is_windows_dark_mode():
+                # Use dark icon if system is in dark mode
+                icon = QIcon("icon_dark.png")
+            else:
+                # Use light icon for normal mode
+                icon = QIcon("icon.png")
             if icon.isNull():
                 # Create a simple default icon if file doesn't exist
                 icon = self.style().standardIcon(self.style().SP_ComputerIcon)
@@ -906,10 +926,15 @@ class TrayApp(QApplication):
 
         self.select_action = QAction("Select Window")
         self.show_target_action = QAction("Show Current Target")
+        self.run_at_startup_action = QAction("Run at Startup")
+        self.run_at_startup_action.setCheckable(True)
+        self.run_at_startup_action.setChecked(self.is_set_to_run_at_startup())
         self.quit_action = QAction("Quit")
 
         self.menu.addAction(self.select_action)
         self.menu.addAction(self.show_target_action)
+        self.menu.addSeparator()
+        self.menu.addAction(self.run_at_startup_action)
         self.menu.addSeparator()
         self.menu.addAction(self.quit_action)
 
@@ -925,6 +950,7 @@ class TrayApp(QApplication):
 
         self.select_action.triggered.connect(self.open_selector)
         self.show_target_action.triggered.connect(self.show_current_target)
+        self.run_at_startup_action.triggered.connect(self.toggle_run_at_startup)
         self.quit_action.triggered.connect(self.quit_all)
         
         # Allow single-click or double-click on tray icon to open selector
@@ -959,6 +985,74 @@ class TrayApp(QApplication):
         else:
             QMessageBox.information(None, "No Target", "No target window selected. Use 'Select Window' to choose a target.")
 
+    def is_set_to_run_at_startup(self):
+        """Check if the application is set to run at startup"""
+        try:
+            startup_folder = os.path.join(os.environ['APPDATA'], r'Microsoft\Windows\Start Menu\Programs\Startup')
+            shortcut_path = os.path.join(startup_folder, "PPT Redirector.lnk")
+            return os.path.exists(shortcut_path)
+        except Exception as e:
+            print(f"Error checking startup status: {e}")
+            return False
+
+    def toggle_run_at_startup(self):
+        """Toggle whether the application runs at startup"""
+        try:
+            # Get paths
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            batch_file_path = os.path.join(script_dir, "start_ppt_redirector.bat")
+            startup_folder = os.path.join(os.environ['APPDATA'], r'Microsoft\Windows\Start Menu\Programs\Startup')
+            shortcut_path = os.path.join(startup_folder, "PPT Redirector.lnk")
+            
+            # Check current state
+            is_enabled = os.path.exists(shortcut_path)
+            
+            if is_enabled:
+                # Remove from startup
+                if os.path.exists(shortcut_path):
+                    os.remove(shortcut_path)
+                self.run_at_startup_action.setChecked(False)
+                self.tray.showMessage("PPT Redirector", "Removed from Windows startup", QSystemTrayIcon.Information, 2000)
+            else:
+                # Add to startup by creating a shortcut
+                try:
+                    # First ensure the batch file exists
+                    if not os.path.exists(batch_file_path):
+                        with open(batch_file_path, 'w') as f:
+                            f.write('@echo off\ncd /d "%~dp0"\npythonw main.py')
+                    
+                    # Create the shortcut using PowerShell
+                    powershell_cmd = f'''
+                    $WScriptShell = New-Object -ComObject WScript.Shell
+                    $Shortcut = $WScriptShell.CreateShortcut('{shortcut_path}')
+                    $Shortcut.TargetPath = '{batch_file_path}'
+                    $Shortcut.Description = 'Start PPT Redirector'
+                    $Shortcut.WorkingDirectory = '{script_dir}'
+                    $Shortcut.WindowStyle = 7
+                    $Shortcut.Save()
+                    '''
+                    
+                    subprocess.run(['powershell', '-Command', powershell_cmd], 
+                                   capture_output=True, text=True, check=True)
+                    
+                    # Check if the shortcut was created
+                    if os.path.exists(shortcut_path):
+                        self.run_at_startup_action.setChecked(True)
+                        self.tray.showMessage("PPT Redirector", "Added to Windows startup", QSystemTrayIcon.Information, 2000)
+                    else:
+                        raise Exception("Shortcut file was not created")
+                        
+                except Exception as e:
+                    print(f"Error creating startup shortcut: {e}")
+                    QMessageBox.warning(None, "Startup Configuration", 
+                                        f"Could not add to startup: {e}\n\nTry running as administrator or use add_to_startup.ps1 script.")
+                    self.run_at_startup_action.setChecked(False)
+        except Exception as e:
+            print(f"Error toggling startup: {e}")
+            QMessageBox.warning(None, "Startup Error", f"Error managing startup settings: {e}")
+            # Refresh checkbox state
+            self.run_at_startup_action.setChecked(self.is_set_to_run_at_startup())
+    
     def update_tooltip(self):
         """Update the system tray tooltip based on current target"""
         global target_title
