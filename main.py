@@ -184,9 +184,10 @@ VK_KEYS = {
     'page up': 0x21,
     'page down': 0x22,
     'left': 0x25,
-    'right': 0x27
+    'right': 0x27,
+    'up': 0x26,
+    'down': 0x28
 }
-
 
 def send_key_to_window_advanced(hwnd, vk):
     """Advanced method using AttachThreadInput for stubborn applications"""
@@ -1143,4 +1144,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--show-keys" in sys.argv:
+        print("Key detection mode: Press any key on your PPT clicker (Press ESC to exit).")
+
+        def on_key_event(event):
+            print(f"Key pressed: {event.name} (scan_code={event.scan_code}, vk_code={event.scan_code})")
+            if event.name == 'esc':
+                print("Exiting key detection.")
+                keyboard.unhook_all()
+                sys.exit(0)
+
+        keyboard.on_press(on_key_event)
+        while True:
+            time.sleep(0.1)
+    else:
+        main()
