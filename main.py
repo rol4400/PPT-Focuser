@@ -2,6 +2,7 @@ import sys
 import time
 import ctypes
 import threading
+from io import BytesIO
 import win32gui
 import win32con
 import win32process
@@ -12,6 +13,7 @@ try:
     import win32ui
     import win32api
     from PIL import Image
+    from PyQt5.QtCore import QBuffer
     # PIL.ImageQt is broken in newer versions, we'll use manual conversion
     THUMBNAIL_SUPPORT = True
 except ImportError:
@@ -22,19 +24,21 @@ def pil_to_qpixmap(pil_image):
     """Convert PIL Image to QPixmap - workaround for broken PIL.ImageQt"""
     try:
         # Convert PIL image to bytes
-        import io
+        from io import BytesIO
         from PyQt5.QtGui import QImage
         
         # Convert to RGB if not already
         if pil_image.mode != 'RGB':
             pil_image = pil_image.convert('RGB')
         
-        # Get image data
-        w, h = pil_image.size
-        rgb_data = pil_image.tobytes('raw', 'RGB')
+        # Use in-memory PNG conversion to ensure proper orientation
+        buffer = BytesIO()
+        pil_image.save(buffer, format='PNG')
+        buffer.seek(0)
         
-        # Create QImage
-        qimage = QImage(rgb_data, w, h, QImage.Format_RGB888)
+        # Load from PNG data directly
+        qimage = QImage()
+        qimage.loadFromData(buffer.getvalue())
         
         # Convert to QPixmap
         pixmap = QPixmap.fromImage(qimage)
@@ -388,7 +392,7 @@ def key_listener():
 
 
 def get_window_thumbnail(hwnd, size=(150, 100)):
-    """Capture a thumbnail of the specified window using PyQt5 screenshot capability"""
+    """Capture a thumbnail of the specified window using multiple approaches"""
     if not THUMBNAIL_SUPPORT:
         return get_window_thumbnail_fallback(hwnd, size)
         
@@ -398,13 +402,84 @@ def get_window_thumbnail(hwnd, size=(150, 100)):
         width = right - left
         height = bottom - top
         
-        print(f"Capturing thumbnail for window: {win32gui.GetWindowText(hwnd)}, size: {width}x{height}")
+        window_title = win32gui.GetWindowText(hwnd)
+        print(f"Capturing thumbnail for window: {window_title}, size: {width}x{height}")
         
         if width <= 0 or height <= 0 or width > 3000 or height > 2000:
             print(f"Window has invalid dimensions: {width}x{height}")
             return get_window_thumbnail_fallback(hwnd, size)
+        
+        # First try Windows PrintWindow API - most accurate for capturing exact window
+        try:
+            # Create device contexts and bitmap
+            hwndDC = win32gui.GetWindowDC(hwnd)
+            mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+            saveDC = mfcDC.CreateCompatibleDC()
             
-        # Try to use PyQt5's screen capture abilities (much more reliable than Windows API)
+            saveBitMap = win32ui.CreateBitmap()
+            saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
+            saveDC.SelectObject(saveBitMap)
+            
+            # Capture window with PrintWindow - using PW_RENDERFULLCONTENT flag for best results
+            ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 2)  # 2 = PW_RENDERFULLCONTENT
+            
+            # Convert to PIL Image - use in-memory bitmap approach for best orientation handling
+            from io import BytesIO
+            import struct
+            
+            # Get raw bitmap data
+            bmpstr = saveBitMap.GetBitmapBits(True)
+            bmpinfo = saveBitMap.GetInfo()
+            
+            # Create in-memory BMP file for proper processing - this handles orientation correctly
+            bmp_file = BytesIO()
+            
+            # BMP header (14 bytes)
+            bmp_file.write(b'BM')  # Signature
+            file_size = 14 + 40 + len(bmpstr)  # Header + DIB header + bitmap data
+            bmp_file.write(struct.pack('<I', file_size))  # FileSize
+            bmp_file.write(struct.pack('<I', 0))  # Reserved
+            bmp_file.write(struct.pack('<I', 14 + 40))  # DataOffset
+            
+            # DIB header (40 bytes) - using negative height for top-down orientation
+            bmp_file.write(struct.pack('<I', 40))  # HeaderSize
+            bmp_file.write(struct.pack('<i', bmpinfo['bmWidth']))  # Width
+            bmp_file.write(struct.pack('<i', -bmpinfo['bmHeight']))  # Height (negative = top-down)
+            bmp_file.write(struct.pack('<H', 1))  # Planes
+            bmp_file.write(struct.pack('<H', 32))  # BitCount
+            bmp_file.write(struct.pack('<I', 0))  # Compression
+            bmp_file.write(struct.pack('<I', len(bmpstr)))  # ImageSize
+            bmp_file.write(struct.pack('<i', 0))  # XPelsPerMeter
+            bmp_file.write(struct.pack('<i', 0))  # YPelsPerMeter
+            bmp_file.write(struct.pack('<I', 0))  # ClrUsed
+            bmp_file.write(struct.pack('<I', 0))  # ClrImportant
+            
+            # Bitmap data
+            bmp_file.write(bmpstr)
+            bmp_file.seek(0)
+            
+            # Load from in-memory BMP file
+            img = Image.open(bmp_file)
+            
+            # Resize to thumbnail
+            img.thumbnail(size, Image.Resampling.LANCZOS)
+            
+            # Convert to QPixmap
+            pixmap = pil_to_qpixmap(img)
+            
+            # Clean up resources
+            win32gui.DeleteObject(saveBitMap.GetHandle())
+            saveDC.DeleteDC()
+            mfcDC.DeleteDC()
+            win32gui.ReleaseDC(hwnd, hwndDC)
+            
+            if pixmap and not pixmap.isNull():
+                print(f"Successfully captured window with PrintWindow API")
+                return pixmap
+        except Exception as pw_error:
+            print(f"PrintWindow capture failed: {pw_error}")
+        
+        # Try alternate approach with Qt's window capture
         try:
             from PyQt5.QtWidgets import QApplication
             from PyQt5.QtCore import QRect
@@ -433,24 +508,24 @@ def get_window_thumbnail(hwnd, size=(150, 100)):
                 # Fallback to primary screen
                 containing_screen = QApplication.primaryScreen()
                 
-            # Try to use the window handle directly with Qt
-            # This approach captures only the window contents, not other windows covering it
+            # Try with direct window handle capture first
+            screenshot = None
             try:
-                # First try with window handle (should only capture the specific window)
+                # Use window handle directly - this should only get the window content
                 screenshot = containing_screen.grabWindow(
-                    hwnd,  # Use window handle to grab only this window
-                    0, 0,  # Start at the window client area origin
+                    hwnd,  # Window handle
+                    0, 0,  # Start at origin
                     width, # Width
                     height # Height
                 )
             except Exception:
-                # Fallback to traditional screen capture
+                # Fall back to screen area capture as last resort
                 screenshot = containing_screen.grabWindow(
-                    0,  # Capture entire screen
-                    left,  # X coordinate 
-                    top,   # Y coordinate
-                    width, # Width
-                    height # Height
+                    0,    # Desktop/screen
+                    left, # X 
+                    top,  # Y
+                    width,# Width
+                    height# Height
                 )
             
             if not screenshot.isNull():
@@ -514,39 +589,26 @@ def get_window_thumbnail(hwnd, size=(150, 100)):
                 # Get the actual bitmap data
                 bits = saveBitMap.GetBitmapBits(True)
                 
-                # Create RGB image directly from memory
+                # Create PIL image directly from the raw data using a more reliable approach
                 from io import BytesIO
                 
-                # Create a BMP file in memory
-                bmp_file = BytesIO()
+                # Create PIL image from bitmap data
+                img = Image.frombuffer(
+                    'RGBA', 
+                    (width, height),
+                    bits, 
+                    'raw', 
+                    'BGRA', 
+                    0, 
+                    1
+                )
                 
-                # BMP file header (14 bytes)
-                bmp_file.write(b'BM')  # Signature
-                file_size = 14 + ctypes.sizeof(BITMAPINFOHEADER) + len(bits)
-                bmp_file.write(struct.pack('<I', file_size))  # FileSize
-                bmp_file.write(struct.pack('<I', 0))  # Reserved
-                bmp_file.write(struct.pack('<I', 14 + ctypes.sizeof(BITMAPINFOHEADER)))  # DataOffset
-                
-                # DIB header
-                bmp_file.write(struct.pack('<I', ctypes.sizeof(BITMAPINFOHEADER)))  # HeaderSize
-                bmp_file.write(struct.pack('<i', width))  # Width
-                bmp_file.write(struct.pack('<i', -height))  # Height (negative = top-down)
-                bmp_file.write(struct.pack('<H', 1))  # Planes
-                bmp_file.write(struct.pack('<H', 32))  # BitCount
-                bmp_file.write(struct.pack('<I', 0))  # Compression
-                bmp_file.write(struct.pack('<I', len(bits)))  # ImageSize
-                bmp_file.write(struct.pack('<i', 0))  # XPelsPerMeter
-                bmp_file.write(struct.pack('<i', 0))  # YPelsPerMeter
-                bmp_file.write(struct.pack('<I', 0))  # ClrUsed
-                bmp_file.write(struct.pack('<I', 0))  # ClrImportant
-                
-                # Bitmap data
-                bmp_file.write(bits)
-                bmp_file.seek(0)
+                # Windows bitmaps are stored bottom-up by default, so no need to flip
+                # If images appear upside down, we would uncomment the following line
+                # img = img.transpose(Image.FLIP_TOP_BOTTOM)
                 
                 # Open with PIL directly from memory
                 try:
-                    img = Image.open(bmp_file)
                     
                     # Resize to thumbnail size
                     img.thumbnail(size, Image.Resampling.LANCZOS)
@@ -863,18 +925,19 @@ class TrayApp(QApplication):
         self.show_target_action.triggered.connect(self.show_current_target)
         self.quit_action.triggered.connect(self.quit_all)
         
-        # Allow double-click on tray icon to open selector
+        # Allow single-click or double-click on tray icon to open selector
         self.tray.activated.connect(self.tray_icon_activated)
 
         # Start key listener in background
         self.listener_thread = threading.Thread(target=key_listener, daemon=True)
         self.listener_thread.start()
         
-        print("PPT Redirector started. Right-click the system tray icon to select a target window.")
+        print("PPT Redirector started. Click or right-click the system tray icon to select a target window.")
 
     def tray_icon_activated(self, reason):
-        """Handle tray icon activation (double-click, etc.)"""
-        if reason == QSystemTrayIcon.DoubleClick:
+        """Handle tray icon activation (single click, double-click, etc.)"""
+        if reason == QSystemTrayIcon.DoubleClick or reason == QSystemTrayIcon.Trigger:
+            # Trigger corresponds to a normal left click
             self.open_selector()
 
     def open_selector(self):
