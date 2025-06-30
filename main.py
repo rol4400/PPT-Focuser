@@ -363,13 +363,17 @@ def key_listener():
     global stop_flag, target_hwnd, target_title
     key_pressed = {key: False for key in VK_KEYS.keys()}
     key_last_press_time = {key: 0 for key in VK_KEYS.keys()}
-    debounce_time = 0.3  # Debounce time in seconds (adjust as needed)
+    debounce_time = 0.15  # Debounce time in seconds (adjust as needed)
     failed_attempts = 0
     max_failed_attempts = 5
     
     while not stop_flag:
         if target_hwnd and win32gui.IsWindow(target_hwnd):
             current_time = time.time()
+            
+            # Check if target window is the active (foreground) window
+            foreground_hwnd = win32gui.GetForegroundWindow()
+            is_target_focused = (foreground_hwnd == target_hwnd)
             
             for key, vk in VK_KEYS.items():
                 is_pressed = keyboard.is_pressed(key)
@@ -378,8 +382,12 @@ def key_listener():
                 if is_pressed and not key_pressed[key]:
                     time_since_last_press = current_time - key_last_press_time[key]
                     
-                    # Check if enough time has passed since the last key press (debouncing)
-                    if time_since_last_press > debounce_time:
+                    # Check if the target window is already focused - if so, don't send keys
+                    # because Windows will deliver them directly (avoiding double triggering)
+                    if is_target_focused:
+                        print(f"Target window is already focused - not redirecting {key}")
+                    # Otherwise check debounce and send keys if needed
+                    elif time_since_last_press > debounce_time:
                         print(f"Sending {key} to {target_title} (time since last: {time_since_last_press:.2f}s)")
                         success = send_key_to_window(target_hwnd, vk)
                         
