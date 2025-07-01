@@ -359,6 +359,19 @@ def send_key_to_window(hwnd, vk):
     return False
 
 
+def get_process_exe_path(hwnd):
+    """Get the executable path of the process that owns a window"""
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        handle = win32api.OpenProcess(win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ, False, pid)
+        exe_path = win32process.GetModuleFileNameEx(handle, 0)
+        win32api.CloseHandle(handle)
+        return exe_path
+    except Exception as e:
+        print(f"Error getting process exe path: {e}")
+        return None
+
+
 def key_listener():
     global stop_flag, target_hwnd, target_title
     key_pressed = {key: False for key in VK_KEYS.keys()}
@@ -366,14 +379,30 @@ def key_listener():
     debounce_time = 0.15  # Debounce time in seconds (adjust as needed)
     failed_attempts = 0
     max_failed_attempts = 5
+    target_exe_path = None
     
     while not stop_flag:
         if target_hwnd and win32gui.IsWindow(target_hwnd):
             current_time = time.time()
             
-            # Check if target window is the active (foreground) window
+            # Get the target application's executable path (if not already cached)
+            if target_exe_path is None:
+                target_exe_path = get_process_exe_path(target_hwnd)
+                if target_exe_path:
+                    print(f"Target application: {target_exe_path}")
+            
+            # Check if any window from the same application is focused
             foreground_hwnd = win32gui.GetForegroundWindow()
-            is_target_focused = (foreground_hwnd == target_hwnd)
+            is_target_window_focused = (foreground_hwnd == target_hwnd)
+            is_target_app_focused = False
+            
+            # Check if the foreground window is from the same application
+            if target_exe_path and foreground_hwnd and foreground_hwnd != target_hwnd:
+                foreground_exe_path = get_process_exe_path(foreground_hwnd)
+                if foreground_exe_path and foreground_exe_path == target_exe_path:
+                    is_target_app_focused = True
+                    foreground_title = win32gui.GetWindowText(foreground_hwnd)
+                    print(f"Another window from the same application is focused: {foreground_title}")
             
             for key, vk in VK_KEYS.items():
                 is_pressed = keyboard.is_pressed(key)
@@ -382,10 +411,12 @@ def key_listener():
                 if is_pressed and not key_pressed[key]:
                     time_since_last_press = current_time - key_last_press_time[key]
                     
-                    # Check if the target window is already focused - if so, don't send keys
-                    # because Windows will deliver them directly (avoiding double triggering)
-                    if is_target_focused:
-                        print(f"Target window is already focused - not redirecting {key}")
+                    # Skip sending keys if any window from the target application is already focused
+                    if is_target_window_focused or is_target_app_focused:
+                        print(f"Target application is already focused - not redirecting {key}")
+                        # Still update the last press time to prevent sending the key immediately 
+                        # if user switches to another application right after pressing the key
+                        key_last_press_time[key] = current_time
                     # Otherwise check debounce and send keys if needed
                     elif time_since_last_press > debounce_time:
                         print(f"Sending {key} to {target_title} (time since last: {time_since_last_press:.2f}s)")
