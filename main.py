@@ -1341,9 +1341,34 @@ def check_for_updates():
                 print("Application is up to date.")
             else:
                 print(f"Updates pulled from GitHub: {result.stdout.strip()}")
-                print("Restart might be required for changes to take effect.")
                 update_found = True
                 update_message = f"Updates installed: {result.stdout.strip()}"
+                
+                # Install/update dependencies after pulling updates
+                requirements_file = os.path.join(script_dir, "requirements.txt")
+                if os.path.exists(requirements_file):
+                    print("Installing/updating dependencies from requirements.txt...")
+                    try:
+                        pip_result = subprocess.run(
+                            ["pip", "install", "-r", "requirements.txt"],
+                            cwd=script_dir,
+                            check=True,
+                            capture_output=True,
+                            text=True
+                        )
+                        print(f"Dependencies updated successfully: {pip_result.stdout.strip()}")
+                        update_message += "\nDependencies updated."
+                    except subprocess.CalledProcessError as e:
+                        print(f"Warning: Failed to update dependencies: {e}")
+                        print(f"pip stderr: {e.stderr}")
+                        update_message += "\nWarning: Dependency update failed."
+                    except FileNotFoundError:
+                        print("Warning: pip not found. Please install dependencies manually.")
+                        update_message += "\nWarning: pip not found."
+                else:
+                    print("No requirements.txt found, skipping dependency update.")
+                
+                print("Restart might be required for changes to take effect.")
         
         return update_found, update_message
     except Exception as e:
