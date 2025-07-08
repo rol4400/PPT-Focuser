@@ -10,6 +10,10 @@ import win32con
 import win32process
 import keyboard
 import winreg
+import socket
+from pythonosc import dispatcher
+from pythonosc import osc_server
+from pythonosc.udp_client import SimpleUDPClient
 
 # Try to import optional dependencies for thumbnails
 try:
@@ -442,7 +446,8 @@ def key_listener():
             # Target window no longer exists
             print(f"Target window '{target_title}' is no longer available")
             target_hwnd = None
-            target_title = None
+            # Don't reset target_title so we can reconnect to a window with same title
+            # The tray icon will be updated by the polling timer
                     
         time.sleep(0.05)
 
@@ -872,7 +877,42 @@ class WindowSelector(QWidget):
         self.layout = QVBoxLayout()
         self.list_widget = QListWidget()
         self.list_widget.setAlternatingRowColors(True)
-        
+
+        # Set the icon.png as the window icon
+        self.setWindowIcon(QIcon("icon.png"))
+        self.list_widget.setStyleSheet("""
+            QListWidget {
+                font-size: 14px;
+                background-color: #f9f9f9;
+                border: 1px solid #ddd;
+            }
+            QListWidget::item {
+                padding: 10px;
+            }
+            QListWidget::item:hover {
+                background-color: #e0e0e0;
+            }
+        """)
+
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(32, 32)
+        try:
+            icon = QIcon("icon.png")
+            if icon.isNull():
+                icon = self.style().standardIcon(self.style().SP_ComputerIcon)
+            self.icon_label.setPixmap(icon.pixmap(32, 32))
+        except:
+            self.icon_label.setPixmap(self.style().standardIcon(self.style().SP_ComputerIcon).pixmap(32, 32))
+
+        # Lock the window to only on top
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        self.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                color: #333;
+            }
+        """)
+
         # Add loading label
         self.loading_label = QLabel("Loading windows and capturing thumbnails...")
         self.loading_label.setAlignment(Qt.AlignCenter)
@@ -933,10 +973,18 @@ class WindowSelector(QWidget):
             target_hwnd, target_title = self.windows[index]
             if self.parent_app:
                 self.parent_app.update_tooltip()
+                # Update icon immediately
+                self.parent_app.check_target_window_availability()
             QMessageBox.information(self, "Target Set", f"Target window set:\n{target_title}\n\nYour arrow keys and page up/down will now be redirected to this window.")
             self.close()
         else:
             QMessageBox.warning(self, "No Selection", "Please select a window first.")
+    
+    def closeEvent(self, event):
+        """Clean up when window is closed"""
+        if self.parent_app and hasattr(self.parent_app, 'selector'):
+            self.parent_app.selector = None
+        event.accept()
 
 def is_windows_dark_mode():
     """Check if Windows is in dark mode"""
@@ -979,6 +1027,7 @@ class TrayApp(QApplication):
 
         self.select_action = QAction("Select Window")
         self.show_target_action = QAction("Show Current Target")
+        self.reset_target_action = QAction("Reset Target")
         self.run_at_startup_action = QAction("Run at Startup")
         self.run_at_startup_action.setCheckable(True)
         self.run_at_startup_action.setChecked(self.is_set_to_run_at_startup())
@@ -986,6 +1035,7 @@ class TrayApp(QApplication):
 
         self.menu.addAction(self.select_action)
         self.menu.addAction(self.show_target_action)
+        self.menu.addAction(self.reset_target_action)
         self.menu.addSeparator()
         self.menu.addAction(self.run_at_startup_action)
         self.menu.addSeparator()
@@ -1003,6 +1053,7 @@ class TrayApp(QApplication):
 
         self.select_action.triggered.connect(self.open_selector)
         self.show_target_action.triggered.connect(self.show_current_target)
+        self.reset_target_action.triggered.connect(self.reset_target)
         self.run_at_startup_action.triggered.connect(self.toggle_run_at_startup)
         self.quit_action.triggered.connect(self.quit_all)
         
@@ -1013,6 +1064,11 @@ class TrayApp(QApplication):
         self.listener_thread = threading.Thread(target=key_listener, daemon=True)
         self.listener_thread.start()
         
+        # Set up polling timer to check window availability
+        self.polling_timer = QTimer()
+        self.polling_timer.timeout.connect(self.check_target_window_availability)
+        self.polling_timer.start(3000)  # Check every 3 seconds
+        
         print("PPT Redirector started. Click or right-click the system tray icon to select a target window.")
 
     def tray_icon_activated(self, reason):
@@ -1022,21 +1078,51 @@ class TrayApp(QApplication):
             self.open_selector()
 
     def open_selector(self):
+        # Check if selector is already open to prevent multiple windows
+        if hasattr(self, 'selector') and self.selector and self.selector.isVisible():
+            # Bring existing selector to front instead of creating a new one
+            self.selector.raise_()
+            self.selector.activateWindow()
+            print("Window selector already open - bringing to front")
+            return
+            
         self.selector = WindowSelector(parent_app=self)
         self.selector.show()
 
     def show_current_target(self):
         global target_hwnd, target_title
-        if target_hwnd and target_title:
-            if win32gui.IsWindow(target_hwnd):
+        if target_title:  # We have a target title
+            if target_hwnd and win32gui.IsWindow(target_hwnd):
                 QMessageBox.information(None, "Current Target", f"Currently redirecting keys to:\n{target_title}")
             else:
-                QMessageBox.warning(None, "Target Lost", "The target window is no longer available. Please select a new target.")
+                QMessageBox.warning(None, "Target Lost", 
+                    f"The target window '{target_title}' is currently unavailable. "
+                    "The application will automatically reconnect if a window with the same title appears.\n\n"
+                    "Click 'Select Window' to choose a different target.")
+                # Keep target_title for auto-reconnect but clear target_hwnd
+                target_hwnd = None
+        elif not target_title:  # No target at all
+            QMessageBox.information(None, "No Target", "No target window selected. Use 'Select Window' to choose a target.")
+            
+    def reset_target(self):
+        """Reset the target window and clear auto-reconnect"""
+        global target_hwnd, target_title
+        
+        if target_title:
+            result = QMessageBox.question(None, "Reset Target", 
+                f"Are you sure you want to reset the target window '{target_title}'?\n"
+                "This will clear the auto-reconnect feature.", 
+                QMessageBox.Yes | QMessageBox.No)
+                
+            if result == QMessageBox.Yes:
                 target_hwnd = None
                 target_title = None
-                self.tray.setToolTip("PPT Redirector - No target selected")
+                self.update_tooltip()
+                # Update the icon
+                self.check_target_window_availability()
+                self.tray.showMessage("PPT Redirector", "Target window has been reset", QSystemTrayIcon.Information, 2000)
         else:
-            QMessageBox.information(None, "No Target", "No target window selected. Use 'Select Window' to choose a target.")
+            QMessageBox.information(None, "No Target", "No target window is currently set.")
 
     def is_set_to_run_at_startup(self):
         """Check if the application is set to run at startup"""
@@ -1114,10 +1200,85 @@ class TrayApp(QApplication):
             self.tray.setToolTip(f"PPT Redirector - Target: {target_title}")
         else:
             self.tray.setToolTip("PPT Redirector - No target selected")
+    
+    def check_target_window_availability(self):
+        """Check if the target window is still available and update tray icon accordingly"""
+        global target_hwnd, target_title
+        
+        # Load icons based on dark mode if not already loaded
+        if not hasattr(self, 'icon_good') or not hasattr(self, 'icon_bad'):
+            try:
+                dark_mode = is_windows_dark_mode()
+                
+                # Load good and bad icons
+                self.icon_good = QIcon("icon_good.png")
+                self.icon_bad = QIcon("icon_bad.png")
+                
+                # Fallback to standard icon if either isn't found
+                if self.icon_good.isNull() or self.icon_bad.isNull():
+                    print("Warning: icon_good.png or icon_bad.png not found")
+                    self.icon_good = self.style().standardIcon(self.style().SP_DialogApplyButton)
+                    self.icon_bad = self.style().standardIcon(self.style().SP_DialogCancelButton)
+            except Exception as e:
+                print(f"Error loading status icons: {e}")
+                self.icon_good = self.style().standardIcon(self.style().SP_DialogApplyButton)
+                self.icon_bad = self.style().standardIcon(self.style().SP_DialogCancelButton)
+        
+        # Check if target is set 
+        if target_title:
+            # Check if window is still available
+            if target_hwnd and win32gui.IsWindow(target_hwnd):
+                # Window is available - use good icon
+                self.tray.setIcon(self.icon_good)
+                current_tooltip = self.tray.toolTip()
+                if "unavailable" in current_tooltip.lower():
+                    # Update tooltip if it was previously unavailable
+                    self.tray.setToolTip(f"PPT Redirector - Target: {target_title}")
+            else:
+                # Try to find a window with the same title
+                found_new_window = False
+                if target_title:
+                    # Get all open windows
+                    windows = get_open_windows()
+                    for hwnd, title in windows:
+                        if title == target_title and hwnd != target_hwnd:
+                            print(f"Found window with same title: {title}, reconnecting...")
+                            # Update to use this window
+                            target_hwnd = hwnd
+                            found_new_window = True
+                            # Use good icon since we found a matching window
+                            self.tray.setIcon(self.icon_good)
+                            self.tray.setToolTip(f"PPT Redirector - Target: {target_title}")
+                            break
+                
+                # If no window found with same title, show as unavailable
+                if not found_new_window:
+                    # Window is unavailable - use bad icon
+                    self.tray.setIcon(self.icon_bad)
+                    self.tray.setToolTip(f"PPT Redirector - Target: {target_title} (unavailable)")
+        else:
+            # No target set - use default icon
+            try:
+                if is_windows_dark_mode():
+                    icon = QIcon("icon_dark.png")
+                else:
+                    icon = QIcon("icon.png")
+                
+                if not icon.isNull():
+                    self.tray.setIcon(icon)
+                # No need to update tooltip as it would already be set correctly
+            except Exception as e:
+                print(f"Error loading default icon: {e}")
 
     def quit_all(self):
-        global stop_flag
+        global stop_flag, osc_server_instance
         stop_flag = True
+        # Stop the polling timer
+        if hasattr(self, 'polling_timer'):
+            self.polling_timer.stop()
+        # Stop the OSC server if running
+        if 'osc_server_instance' in globals() and osc_server_instance:
+            osc_server_instance.stop()
         self.tray.hide()
         self.quit()
 
@@ -1168,9 +1329,161 @@ def check_for_updates():
         return False, str(e)
 
 
+class OSCServer:
+    """OSC Server that allows external apps like BitFocus Companion to interact with PPT Redirector"""
+    
+    def __init__(self, app, ip="0.0.0.0", port=9001):
+        """Initialize the OSC server
+        
+        Args:
+            app: Reference to the TrayApp instance
+            ip: IP address to bind to (default: all interfaces)
+            port: Port to listen on (default: 9001)
+        """
+        self.app = app
+        self.ip = ip
+        self.port = port
+        self.server = None
+        self.server_thread = None
+        self.last_client_ip = None  # Store the last client IP
+        
+    def start(self):
+        """Start the OSC server in a background thread"""
+        try:
+            # Create dispatcher for OSC messages
+            disp = dispatcher.Dispatcher()
+            
+            # Register OSC message handlers with a wrapper to capture client IP
+            disp.map("/ppt/status", self._wrap_handler(self.handle_status))
+            disp.map("/ppt/select", self._wrap_handler(self.handle_select))
+            disp.map("/ppt/reset", self._wrap_handler(self.handle_reset))
+            
+            # Create custom server class to capture client addresses
+            class CustomOSCServer(osc_server.ThreadingOSCUDPServer):
+                def __init__(self, server_address, dispatcher, osc_server_instance):
+                    self.osc_server_instance = osc_server_instance
+                    super().__init__(server_address, dispatcher)
+                
+                def process_request(self, request, client_address):
+                    # Capture the client IP before processing
+                    self.osc_server_instance.last_client_ip = client_address[0]
+                    return super().process_request(request, client_address)
+            
+            # Create server
+            try:
+                self.server = CustomOSCServer((self.ip, self.port), disp, self)
+                print(f"OSC server starting on {self.ip}:{self.port}")
+                
+                # Start server in a background thread
+                self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+                self.server_thread.start()
+                print("OSC server running in background thread")
+                return True
+            except socket.error as e:
+                print(f"Could not start OSC server: {e}")
+                return False
+        except Exception as e:
+            print(f"Error initializing OSC server: {e}")
+            return False
+    
+    def _wrap_handler(self, handler):
+        """Wrap a handler to provide additional context"""
+        def wrapper(address, *args):
+            return handler(address, *args)
+        return wrapper
+    
+    def stop(self):
+        """Stop the OSC server"""
+        if self.server:
+            self.server.shutdown()
+            print("OSC server stopped")
+    
+    def handle_status(self, address, *args):
+        """Handle status request - returns current connection status
+        
+        Status values:
+        - "connected": Target window is set and available
+        - "disconnected": Target window is set but unavailable
+        - "unset": No target window is set
+        """
+        global target_hwnd, target_title
+        
+        # Use the captured client IP or fallback
+        client_ip = self.last_client_ip or "127.0.0.1"
+        reply_port = args[0] if args else 9002
+        
+        try:
+            client = SimpleUDPClient(client_ip, reply_port)
+        except Exception as e:
+            print(f"Error creating UDP client for {client_ip}:{reply_port}: {e}")
+            return
+        
+        if target_hwnd and target_title and win32gui.IsWindow(target_hwnd):
+            status = "connected"
+            window_title = target_title
+        elif target_title and not (target_hwnd and win32gui.IsWindow(target_hwnd)):
+            status = "disconnected"
+            window_title = target_title
+        else:
+            status = "unset"
+            window_title = ""
+        
+        # Send response - format as a single string to avoid argument issues
+        try:
+            # Create a response string with status and title separated by a delimiter
+            response = f"{status}" if window_title else status
+            client.send_message("/ppt/status/reply", response)
+            print(f"OSC status request: replied to {client_ip}:{reply_port} with '{response}'")
+        except Exception as e:
+            print(f"Error sending OSC reply to {client_ip}:{reply_port}: {e}")
+    
+    def handle_select(self, address, *args):
+        """Handle select request - opens window selection dialog"""
+        print("OSC select request received")
+        
+        # Check if selector is already open to prevent multiple windows
+        if hasattr(self.app, 'selector') and self.app.selector and self.app.selector.isVisible():
+            print("Window selector already open - ignoring OSC select request")
+            return
+            
+        # We need to call this on the main thread
+        # Using QTimer to make it happen on the Qt main thread
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(0, self.app.open_selector)
+    
+    def handle_reset(self, address, *args):
+        """Handle reset request - resets target window"""
+        global target_hwnd, target_title
+        
+        print("OSC reset request received")
+        # Reset target window
+        target_hwnd = None
+        target_title = None
+        
+        # Update UI on main thread
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self.app.update_tooltip())
+        QTimer.singleShot(0, lambda: self.app.check_target_window_availability())
+        
+        # Send confirmation
+        client_ip = self.last_client_ip or "127.0.0.1"
+        reply_port = args[0] if args else 9002
+        try:
+            client = SimpleUDPClient(client_ip, reply_port)
+            client.send_message("/ppt/reset/reply", "ok")
+            print(f"OSC reset confirmation sent to {client_ip}:{reply_port}")
+        except Exception as e:
+            print(f"Error sending OSC reset confirmation: {e}")
+
+
 def main():
     # Start the application first to access Qt functionality
     app = TrayApp(sys.argv)
+    
+    # Start OSC server - make it globally accessible
+    global osc_server_instance
+    osc_server_instance = OSCServer(app)
+    osc_server_instance.start()
     
     # Check for updates after application is initialized
     def delayed_update_check():
