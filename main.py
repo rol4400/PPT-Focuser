@@ -1086,6 +1086,8 @@ class TrayApp(QApplication):
             print("Window selector already open - bringing to front")
             return
             
+        # Mark that user is manually selecting a target
+        self._manual_target_set = True
         self.selector = WindowSelector(parent_app=self)
         self.selector.show()
 
@@ -1111,12 +1113,15 @@ class TrayApp(QApplication):
         if target_title:
             result = QMessageBox.question(None, "Reset Target", 
                 f"Are you sure you want to reset the target window '{target_title}'?\n"
-                "This will clear the auto-reconnect feature.", 
+                "This will clear the auto-reconnect feature and allow auto-targeting of PowerPoint presentations.", 
                 QMessageBox.Yes | QMessageBox.No)
                 
             if result == QMessageBox.Yes:
                 target_hwnd = None
                 target_title = None
+                # Clear manual target flag to allow auto-targeting again
+                if hasattr(self, '_manual_target_set'):
+                    delattr(self, '_manual_target_set')
                 self.update_tooltip()
                 # Update the icon
                 self.check_target_window_availability()
@@ -1223,6 +1228,23 @@ class TrayApp(QApplication):
                 print(f"Error loading status icons: {e}")
                 self.icon_good = self.style().standardIcon(self.style().SP_DialogApplyButton)
                 self.icon_bad = self.style().standardIcon(self.style().SP_DialogCancelButton)
+        
+        # Auto-target PowerPoint Slide Show if no manual target is set
+        if not target_title and not hasattr(self, '_manual_target_set'):
+            try:
+                windows = get_open_windows()
+                for hwnd, title in windows:
+                    if "PowerPoint Slide Show" in title:
+                        print(f"Auto-targeting PowerPoint Slide Show: {title}")
+                        target_hwnd = hwnd
+                        target_title = title
+                        self.update_tooltip()
+                        self.tray.showMessage("PPT Redirector", 
+                                            f"Auto-targeted PowerPoint presentation:\n{title}", 
+                                            QSystemTrayIcon.Information, 3000)
+                        break
+            except Exception as e:
+                print(f"Error during auto-targeting: {e}")
         
         # Check if target is set 
         if target_title:
