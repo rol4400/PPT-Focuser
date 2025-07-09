@@ -1234,7 +1234,7 @@ class TrayApp(QApplication):
             try:
                 windows = get_open_windows()
                 for hwnd, title in windows:
-                    if "PowerPoint Slide Show" in title:
+                    if any(keyword in title for keyword in ("PowerPoint Slide Show", "PowerPoint 슬라이드 쇼")):
                         print(f"Auto-targeting PowerPoint Slide Show: {title}")
                         target_hwnd = hwnd
                         target_title = title
